@@ -1,12 +1,12 @@
-use image::{imageops::FilterType, RgbaImage};
+use image::{RgbaImage, imageops::FilterType};
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 use xcap::Monitor;
@@ -68,7 +68,7 @@ impl Default for Config {
             },
             monitor: MonitorSettings {
                 interval_ms: 500,
-                threshold: 5000,
+                threshold: 10,
                 cooldown_ms: 3000,
             },
         }
@@ -259,20 +259,25 @@ fn capture_region(monitor: &Monitor, area: &CaptureArea) -> Option<Vec<u8>> {
     let region = monitor
         .capture_region(area.x, area.y, area.width, area.height)
         .ok()?;
-    let small = image::imageops::resize(
-        &region,
-        (area.width / 4).max(1),
-        (area.height / 4).max(1),
-        FilterType::Triangle,
-    );
-    Some(small.into_raw())
+    // 不缩小，直接用原始像素对比，保留图标闪烁等细微变化
+    Some(region.into_raw())
 }
 
-fn pixel_diff(a: &[u8], b: &[u8]) -> u64 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as i64 - y as i64).unsigned_abs())
-        .sum()
+/// 计算有多少像素发生了明显变化（单像素 RGBA 差值之和 > per_pixel_thresh）
+fn pixel_diff(a: &[u8], b: &[u8], per_pixel_thresh: u64) -> u64 {
+    // 每 4 字节一组 (RGBA)
+    a.chunks(4)
+        .zip(b.chunks(4))
+        .filter(|(pa, pb)| {
+            let d: u64 = pa
+                .iter()
+                .zip(pb.iter())
+                .take(3) // 只比较 RGB，忽略 Alpha
+                .map(|(&x, &y)| (x as i64 - y as i64).unsigned_abs())
+                .sum();
+            d > per_pixel_thresh
+        })
+        .count() as u64
 }
 
 fn start_monitoring(config: Config, running: Arc<AtomicBool>) {
@@ -310,12 +315,8 @@ fn start_monitoring(config: Config, running: Arc<AtomicBool>) {
         }
 
         let mut last_capture = match capture_region(&monitor, &config.capture) {
-            Some(c) => {
-                eprintln!("[调试] 初始截图成功, 数据长度: {}", c.len());
-                c
-            }
+            Some(c) => c,
             None => {
-                eprintln!("[调试] 初始截图失败!");
                 running.store(false, Ordering::SeqCst);
                 return;
             }
@@ -333,19 +334,10 @@ fn start_monitoring(config: Config, running: Arc<AtomicBool>) {
             }
 
             let Some(current) = capture_region(&monitor, &config.capture) else {
-                eprintln!("[调试] 截图失败 tick={}", tick);
                 continue;
             };
-            let d = pixel_diff(&last_capture, &current);
+            let d = pixel_diff(&last_capture, &current, 30);
             tick += 1;
-
-            // 前 10 次每次都打印 diff 值，之后每 20 次打印一次
-            if tick <= 10 || tick % 20 == 0 {
-                eprintln!(
-                    "[调试] tick={} diff={} threshold={}",
-                    tick, d, config.monitor.threshold
-                );
-            }
 
             last_capture = current;
 
@@ -490,7 +482,7 @@ fn main() {
     // ─── 阈值 ───
     let mut lbl_thresh = nwg::Label::default();
     nwg::Label::builder()
-        .text("阈值")
+        .text("像素数")
         .parent(&window)
         .position((220, 145))
         .size((60, 25))
