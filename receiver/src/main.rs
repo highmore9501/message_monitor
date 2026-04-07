@@ -170,16 +170,17 @@ fn main() {
             match socket.recv_from(&mut buf) {
                 Ok((len, addr)) => {
                     let msg = std::str::from_utf8(&buf[..len]).unwrap_or("");
+                    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                     match msg {
                         "MSG" => {
-                            println!("收到通知 (来自 {})", addr);
+                            println!("{} 收到通知 (来自 {})", current_time, addr);
                             let _ = tx.send(UdpMsg::Notification);
                         }
                         "HB" => {
                             let _ = tx.send(UdpMsg::Heartbeat);
                         }
                         other => {
-                            println!("未知消息: {} (来自 {})", other, addr);
+                            println!("{} 未知消息: {} (来自 {})", current_time, other, addr);
                         }
                     }
                 }
